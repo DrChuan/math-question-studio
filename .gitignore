@@ -1,0 +1,26 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# Personal question-bank data, images, and generated exports
+data/*
+!data/.gitkeep
+*.tex
+*.pdf
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.docx
+
+# Local MathType / VMware experiments and temporary files
+vm_probe/
+tmp_export*.docx
+
+# macOS and editor files
+.DS_Store
+.vscode/
+.idea/
+

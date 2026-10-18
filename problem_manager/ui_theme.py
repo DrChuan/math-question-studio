@@ -79,6 +79,15 @@ QLabel#mutedText, QLabel#browseCount {
     font-size: 12px;
 }
 
+QLabel#activeFilters {
+    color: #756858;
+    font-size: 12px;
+    background: #f5eee3;
+    border: 1px solid #e4d5c1;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+
 QPushButton {
     background: #fffdf8;
     color: #244238;
@@ -97,6 +106,12 @@ QPushButton:pressed {
     background: #dae8dc;
 }
 
+QPushButton:disabled {
+    background: #e8ece7;
+    color: #9aa49d;
+    border-color: #d7ddd7;
+}
+
 QPushButton#primaryButton {
     background: #1d5a4e;
     color: white;
@@ -109,7 +124,28 @@ QPushButton#primaryButton:hover {
     border-color: #174a40;
 }
 
+QPushButton#secondaryButton {
+    min-height: 22px;
+    padding: 2px 10px;
+    color: #5c6d63;
+    background: #f5f8f3;
+    border-color: #cfd9d0;
+    font-size: 12px;
+}
+
+QPushButton#secondaryButton:hover {
+    color: #1d5a4e;
+    background: #e8f2ea;
+}
+
 QPushButton#basketButton {
+    background: #fbf0df;
+    border-color: #d9ad78;
+    color: #7d421f;
+    font-weight: 700;
+}
+
+QComboBox#basketCombo {
     background: #fbf0df;
     border-color: #d9ad78;
     color: #7d421f;
@@ -136,9 +172,17 @@ QPlainTextEdit {
 }
 
 QComboBox::drop-down {
-    width: 25px;
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 30px;
     border: none;
+    border-left: 1px solid #d1dbd2;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    background: #edf3ee;
 }
+
+QComboBox::down-arrow { width: 0px; height: 0px; }
 
 QComboBox QAbstractItemView {
     background: #fffefa;
@@ -247,5 +291,13 @@ QCheckBox::indicator:checked {
 
 QDialog {
     background: #f7f9f5;
+}
+
+QDialog QLabel {
+    color: #284138;
+}
+
+QDialogButtonBox {
+    padding-top: 6px;
 }
 """

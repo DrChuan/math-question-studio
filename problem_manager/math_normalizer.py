@@ -5,10 +5,14 @@ import re
 from problem_manager.latex_support import split_math_segments
 
 
-def normalize_math_expression(expr: str) -> str:
+def normalize_math_expression(expr: str, *, expand_shortcuts: bool = True) -> str:
     normalized = expr.strip()
+    if expand_shortcuts:
+        normalized = _expand_vectors(normalized)
+        normalized = normalized.replace("@", r"\underline{\quad\quad}")
     normalized = normalized.replace(r"\tfrac", r"\dfrac")
     normalized = re.sub(r"(?<![A-Za-z])\\frac\b", r"\\dfrac", normalized)
+    normalized = _expand_compact_fractions(normalized)
     # Accept pasted single/double backslashes, then store one canonical LaTeX command.
     normalized = re.sub(
         r"\\+blank\b",
@@ -34,12 +38,77 @@ def normalize_math_expression(expr: str) -> str:
     return normalized
 
 
+def _expand_vectors(expr: str) -> str:
+    decoration = r"(?:_[A-Za-z0-9]|_\{[^{}]+\}|'+|\\prime|\^(?:\\prime|\{(?:\\prime\s*|')+\}))"
+    token = r"[A-Za-z]" + decoration + "*"
+    def expand(match):
+        body = match.group(1)
+        if re.fullmatch(token, body) and body[0].islower():
+            return r"\boldsymbol{" + body + "}"
+        if re.fullmatch(token + token, body) and body[0].isupper():
+            letters = re.sub(decoration, "", body)
+            if len(letters) == 2 and letters.isupper():
+                return r"\overrightarrow{" + body + "}"
+        return r"\overrightarrow{" + body + "}"
+    return re.sub(r"\\v\{((?:[^{}]|\{[^{}]*\})*)\}", expand, expr)
+
+
+def migrate_blank_markers(text: str) -> str:
+    text = re.sub(r"\\+underline\{(?:\\+quad\s*)+\}|\\+blank\b|_{3,}|＿{2,}", "@", text)
+    return text
+
+
+def _expand_compact_fractions(expr: str) -> str:
+    """Make TeX's compact \\frac12 form explicit for local renderers."""
+    result: list[str] = []
+    index = 0
+    command = r"\dfrac"
+    while index < len(expr):
+        if not expr.startswith(command, index):
+            result.append(expr[index])
+            index += 1
+            continue
+        numerator = _read_tex_atom(expr, index + len(command))
+        if numerator is None:
+            result.append(command)
+            index += len(command)
+            continue
+        denominator = _read_tex_atom(expr, numerator[1])
+        if denominator is None:
+            result.append(command)
+            index += len(command)
+            continue
+        result.append(r"\dfrac{" + numerator[0] + "}{" + denominator[0] + "}")
+        index = denominator[1]
+    return "".join(result)
+
+
+def _read_tex_atom(expr: str, index: int) -> tuple[str, int] | None:
+    while index < len(expr) and expr[index].isspace():
+        index += 1
+    if index >= len(expr):
+        return None
+    if expr[index] == "{":
+        end = _find_matching_close(expr, index)
+        if end is None:
+            return None
+        return expr[index + 1 : end], end + 1
+    if expr[index] == "\\":
+        end = index + 1
+        while end < len(expr) and expr[end].isalpha():
+            end += 1
+        if end == index + 1:
+            end += 1
+        return expr[index:end], end
+    return expr[index], index + 1
+
+
 def normalize_mixed_latex_text(text: str) -> str:
     parts: list[str] = []
     for kind, content, display in split_math_segments(text):
         if kind == "math":
             delimiter = "$$" if display else "$"
-            parts.append(delimiter + normalize_math_expression(content) + delimiter)
+            parts.append(delimiter + normalize_math_expression(content, expand_shortcuts=False) + delimiter)
         else:
             parts.append(content)
     return "".join(parts)

@@ -148,7 +148,7 @@ def _render_title(title: str) -> str:
 
 
 def _render_question(index: int, question: Question, options: LatexExportOptions) -> str:
-    image_layout = _get_image_layout(question.image_path)
+    image_layout = _get_image_layout(question.question_images[0]) if len(question.question_images) == 1 else None
     minimum_lines = 16 if question.question_type == "解答题" else 10
     if image_layout == "wide":
         minimum_lines += 7
@@ -168,6 +168,9 @@ def _render_question(index: int, question: Question, options: LatexExportOptions
 
     if image_layout == "wide":
         parts.append(_render_wide_image(index, question))
+    if len(question.question_images) > 1:
+        for position, path in enumerate(question.question_images, 1):
+            parts.append(_render_gallery_image(path, f"第{index}题图（{position}）"))
 
     if question.question_type in CHOICE_TYPES:
         choice_block = _render_choice_block(question, constrained=image_layout == "wrap")
@@ -177,6 +180,7 @@ def _render_question(index: int, question: Question, options: LatexExportOptions
     if options.include_analysis:
         parts.append(_render_answer_block(question.answer))
         parts.append(_render_labeled_block("解析", question.analysis))
+        parts.extend(_render_gallery_image(path, "") for path in question.analysis_image_paths)
     if options.include_note:
         parts.append(_render_labeled_block("备注", question.note))
     if options.leave_solution_space and question.question_type == "解答题":
@@ -259,8 +263,14 @@ def _get_image_layout(image_path: str) -> str | None:
 
 
 def _image_include_command(question: Question, width: str, height: str) -> str:
-    path = Path(question.image_path).resolve().as_posix()
+    path = Path(question.question_images[0]).resolve().as_posix()
     return "\\includegraphics[width=" + width + ",height=" + height + ",keepaspectratio]{\\detokenize{" + path + "}}"
+
+
+def _render_gallery_image(path: str, caption: str) -> str:
+    if not Path(path).is_file():
+        return ""
+    return r"\begin{center}\includegraphics[width=0.72\linewidth,height=0.30\textheight,keepaspectratio]{\detokenize{" + Path(path).resolve().as_posix() + "}}\\par " + caption + r"\end{center}"
 
 
 def _render_wide_image(index: int, question: Question) -> str:
@@ -316,7 +326,7 @@ def _render_inline_fragments(text: str) -> str:
             if content:
                 fragments.append("$" + normalize_math_expression(content) + "$")
         elif content:
-            fragments.append(_escape_latex_text(content))
+            fragments.append(r"\underline{\hspace{4em}}".join(_escape_latex_text(part) for part in content.split("@")))
     return "".join(fragments).strip()
 
 

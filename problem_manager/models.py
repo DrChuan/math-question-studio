@@ -26,6 +26,8 @@ class Question:
     source: str = ""
     created_at: str = field(default_factory=lambda: date.today().isoformat())
     image_path: str = ""
+    image_paths: list[str] = field(default_factory=list)
+    analysis_image_paths: list[str] = field(default_factory=list)
     stem: str = ""
     options: list[str] = field(default_factory=lambda: ["", "", "", "", "", ""])
     answer: str = ""
@@ -33,6 +35,7 @@ class Question:
     note: str = ""
     knowledge_tags: list[str] = field(default_factory=list)
     method_tags: list[str] = field(default_factory=list)
+    learning_tags: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Question":
@@ -50,6 +53,8 @@ class Question:
             source=data.get("source", ""),
             created_at=data.get("created_at") or date.today().isoformat(),
             image_path=data.get("image_path", ""),
+            image_paths=list(data.get("image_paths", [])) or ([data["image_path"]] if data.get("image_path") else []),
+            analysis_image_paths=list(data.get("analysis_image_paths", [])),
             stem=data.get("stem", ""),
             options=options[: len(OPTION_LABELS)],
             answer=data.get("answer", ""),
@@ -57,6 +62,7 @@ class Question:
             note=data.get("note", ""),
             knowledge_tags=list(data.get("knowledge_tags", [])),
             method_tags=list(data.get("method_tags", [])),
+            learning_tags=list(data.get("learning_tags", [])),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,6 +73,8 @@ class Question:
             "source": self.source,
             "created_at": self.created_at,
             "image_path": self.image_path,
+            "image_paths": self.question_images,
+            "analysis_image_paths": self.analysis_image_paths,
             "stem": self.stem,
             "options": self.options[: len(OPTION_LABELS)],
             "answer": self.answer,
@@ -74,7 +82,16 @@ class Question:
             "note": self.note,
             "knowledge_tags": self.knowledge_tags,
             "method_tags": self.method_tags,
+            "learning_tags": self.learning_tags,
         }
+
+    @property
+    def question_images(self) -> list[str]:
+        return self.image_paths or ([self.image_path] if self.image_path else [])
+
+    @property
+    def all_images(self) -> list[str]:
+        return [*self.question_images, *self.analysis_image_paths]
 
     def title(self, index: int) -> str:
         text = " ".join(self.stem.split())
@@ -91,5 +108,25 @@ class Question:
 class AppState:
     questions: list[Question] = field(default_factory=list)
     method_tag_library: list[str] = field(default_factory=list)
-    basket_question_ids: list[str] = field(default_factory=list)
+    learning_tag_library: list[str] = field(default_factory=list)
+    baskets: list["QuestionBasket"] = field(default_factory=list)
+    active_basket_id: str = ""
     vmware_profile: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class QuestionBasket:
+    id: str = field(default_factory=lambda: uuid4().hex)
+    name: str = "默认试题篮"
+    question_ids: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "QuestionBasket":
+        return cls(
+            id=data.get("id") or uuid4().hex,
+            name=str(data.get("name") or "未命名试题篮"),
+            question_ids=list(data.get("question_ids", [])),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "name": self.name, "question_ids": self.question_ids}

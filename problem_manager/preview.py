@@ -16,6 +16,8 @@ from typing import Iterable
 
 from problem_manager.math_normalizer import normalize_math_expression
 from problem_manager.models import CHOICE_TYPES, OPTION_LABELS, Question
+from problem_manager.image_markup import split_image_content, image_marker, image_code_settings
+from problem_manager.star_rating import stars_html
 
 
 # Preview must remain usable without a network connection.  Mathematical SVG is
@@ -113,13 +115,13 @@ def _prepared_math(expressions: Iterable[str]):
         _ACTIVE_PREVIEW_SVGS.reset(token)
 
 
-def _render_text_with_math(text: str, editor_target: str | None = None) -> str:
+def _render_text_with_math(text: str, editor_target: str | None = None, source_start: int = 0) -> str:
     if not text.strip():
         return "<p class='empty'>暂无内容</p>"
 
     segments = _split_math_segments(text)
     html_parts: list[str] = []
-    source_offset = 0
+    source_offset = source_start
     for kind, content in segments:
         if kind == "math":
             fragment = _render_math_segment_for_preview(content)
@@ -133,6 +135,21 @@ def _render_text_with_math(text: str, editor_target: str | None = None) -> str:
         html_parts.append(fragment)
         source_offset += len(content)
     return f"<p>{''.join(html_parts)}</p>"
+
+
+def render_content_with_images(text: str, paths: list[str], target: str | None = None, image_widths: dict[str, int] | None = None) -> str:
+    parts = []
+    widths = dict(image_widths or {})
+    widths.update({key: value for key, value in image_code_settings(text, paths).items() if value is not None})
+    for kind, content, offset in split_image_content(text, paths):
+        if kind == "image":
+            rendered = _render_question_image(content, "preview-image", widths.get(image_marker(content)))
+            if target:
+                rendered = f"<span data-editor-target='{target}' data-source-offset='{offset}'>{rendered}</span>"
+            parts.append(rendered)
+        elif content.strip():
+            parts.append(_render_text_with_math(content, target, offset))
+    return "".join(parts)
 
 
 def _split_math_segments(text: str) -> list[tuple[str, str]]:
@@ -233,6 +250,7 @@ def _render_one_latex_svg(expression: str) -> str:
                 stderr=subprocess.DEVNULL,
                 check=True,
                 timeout=12,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             svg_file = workdir / "formula.svg"
             subprocess.run(
@@ -242,6 +260,7 @@ def _render_one_latex_svg(expression: str) -> str:
                 stderr=subprocess.DEVNULL,
                 check=True,
                 timeout=12,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             encoded = base64.b64encode(svg_file.read_bytes()).decode("ascii")
             depth = _read_formula_depths(workdir / "formula.log").get(1, 0.0)
@@ -293,6 +312,7 @@ def _render_latex_svg_batch(expressions: Iterable[str]) -> dict[str, str]:
                 stderr=subprocess.DEVNULL,
                 check=True,
                 timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             subprocess.run(
                 [dvisvgm, "--no-fonts", "--exact", "--bbox=min", f"--page=1-{len(pending)}", f"--output={workdir / 'formula-%p.svg'}", str(workdir / "formulas.dvi")],
@@ -301,6 +321,7 @@ def _render_latex_svg_batch(expressions: Iterable[str]) -> dict[str, str]:
                 stderr=subprocess.DEVNULL,
                 check=True,
                 timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             depths = _read_formula_depths(workdir / "formulas.log")
             for index, expression in enumerate(pending, start=1):
@@ -371,14 +392,14 @@ def _render_question_preview_sections(question: Question) -> str:
                 )
         option_html = "".join(options)
 
-    image_html = "".join(_render_question_image(path, "preview-image") for path in question.question_images)
+    image_html = "".join(_render_question_image(path, "preview-image", question.image_widths.get(image_marker(path))) for path in question.question_images)
     sections = [
         ("题型", html.escape(question.question_type)),
         (
             "属性",
             "；".join(
                 [
-                    f"难度：{question.difficulty}",
+                    f"难度：{stars_html(question.difficulty)}",
                     f"来源：{html.escape(question.source) if question.source else '未填写'}",
                     f"创建日期：{html.escape(question.created_at)}",
                 ]
@@ -401,7 +422,7 @@ def _render_question_preview_sections(question: Question) -> str:
     sections.extend(
         [
             ("答案", _render_text_with_math(question.answer, "answer")),
-            ("解析", _render_text_with_math(question.analysis, "analysis") + "".join(_render_question_image(path, "preview-image") for path in question.analysis_image_paths)),
+            ("解析", render_content_with_images(question.analysis, question.analysis_image_paths, "analysis", question.image_widths)),
             ("备注", _render_text_with_math(question.note, "note")),
         ]
     )
@@ -493,20 +514,29 @@ def _render_question_preview_document(content: str) -> str:
 """
 
 
-def render_text_editor_preview(text: str, title: str) -> str:
+def render_text_editor_preview(text: str, title: str, image_paths: list[str] | None = None, image_widths: dict[str, int] | None = None) -> str:
     """Render one editable text field in the same offline math style as a question card."""
     with _prepared_math(_collect_math_expressions([text])):
-        return _render_text_editor_preview_document(_render_text_editor_preview_fragment(text, title))
+        return _render_text_editor_preview_document(_render_text_editor_preview_fragment(text, title, image_paths, image_widths))
 
 
-def render_text_editor_preview_fragment(text: str, title: str) -> str:
+def render_text_editor_preview_fragment(text: str, title: str, image_paths: list[str] | None = None, image_widths: dict[str, int] | None = None) -> str:
     """Render the changeable content of the expanded text editor preview."""
     with _prepared_math(_collect_math_expressions([text])):
-        return _render_text_editor_preview_fragment(text, title)
+        return _render_text_editor_preview_fragment(text, title, image_paths, image_widths)
 
 
-def _render_text_editor_preview_fragment(text: str, title: str) -> str:
-    return f"<h1>{html.escape(title)}预览</h1>{_render_text_with_math(text, 'dialog')}"
+def _render_text_editor_preview_fragment(text: str, title: str, image_paths: list[str] | None = None, image_widths: dict[str, int] | None = None) -> str:
+    return render_content_with_images(text, image_paths or [], 'dialog', image_widths)
+
+
+def render_question_context(question: Question) -> str:
+    with _prepared_math(_collect_math_expressions([question.stem, *question.options])):
+        content = _render_text_with_math(question.stem)
+        if question.question_type in CHOICE_TYPES:
+            content += "<div>" + "".join(f"<span style='display:inline-block;margin-right:24px'>{label}. {_render_text_with_math(option)}</span>" for label, option in zip(OPTION_LABELS, question.options) if option.strip()) + "</div>"
+        content += "".join(_render_question_image(path, "context-image", 25) for path in question.question_images)
+        return "<!DOCTYPE html><meta charset='utf-8'><style>body{margin:12px 18px;background:#fffefa;color:#18251f;font:17px 'Times New Roman','Songti SC',serif}p{line-height:2;margin:3px 0}.math-expression{vertical-align:baseline}.context-image{display:inline-block!important;max-height:100px!important;object-fit:contain}</style>" + content
 
 
 def _render_text_editor_preview_document(content: str) -> str:
@@ -585,7 +615,7 @@ def _render_browse_cards(
         rendered_tags = tag_html or "<span class='untagged'>未标注标签</span>"
         source = html.escape(question.source) if question.source else "未填写来源"
         created_at = html.escape(question.created_at)
-        image_html = "".join(_render_question_image(path, "card-image") for path in question.question_images)
+        image_html = "".join(_render_question_image(path, "card-image", question.image_widths.get(image_marker(path))) for path in question.question_images)
         option_html = ""
         if question.question_type in CHOICE_TYPES:
             options = []
@@ -604,7 +634,7 @@ def _render_browse_cards(
             details_html = (
                 "<div class='details'>"
                 f"<section><h4>答案</h4>{_render_text_with_math(question.answer)}</section>"
-                f"<section><h4>解析</h4>{_render_text_with_math(question.analysis)}{''.join(_render_question_image(path, 'card-image') for path in question.analysis_image_paths)}</section>"
+                f"<section><h4>解析</h4>{render_content_with_images(question.analysis, question.analysis_image_paths, image_widths=question.image_widths)}</section>"
                 f"<section><h4>备注</h4>{_render_text_with_math(question.note)}</section>"
                 "</div>"
             )
@@ -618,7 +648,6 @@ def _render_browse_cards(
             f"<div class='tags'>{rendered_tags}</div>"
             "<div class='actions'>"
             f"<a href='pm://detail/{question_id}'>{detail_label}</a>"
-            f"<a href='pm://labels/{question_id}'>学习标签</a>"
             "<label class='basket-check'>"
             f"<input type='checkbox'{basket_checked} onchange=\"window.location.href='pm://basket/{question_id}'\">"
             f"{html.escape(basket_label)}</label>"
@@ -626,8 +655,7 @@ def _render_browse_cards(
             f"<a href='pm://delete/{question_id}' class='danger'>删除</a>"
             "</div>"
             "</header>"
-            f"<div class='metadata'>难度 {question.difficulty} / 来源：{source} / 创建：{created_at}</div>"
-            f"{learning_tags_html}"
+            f"<div class='metadata'>难度 {stars_html(question.difficulty)} / 来源：{source} / 创建：{created_at}</div>"
             f"<div class='stem'>{_render_text_with_math(question.stem)}</div>"
             f"{image_html}"
             f"{option_html}{details_html}"
@@ -695,18 +723,9 @@ def _render_browse_cards(
 
 def render_overview(questions: Iterable[Question], chapter_counts: list[tuple[str, int]]) -> str:
     question_list = list(questions)
-    learning_counts: dict[str, int] = {}
-    for question in question_list:
-        for tag in question.learning_tags:
-            learning_counts[tag] = learning_counts.get(tag, 0) + 1
     recent = sorted(question_list, key=lambda question: question.created_at, reverse=True)[:6]
     metric_html = (
         f"<div class='metric'><strong>{len(question_list)}</strong><span>题目总数</span></div>"
-        + "".join(
-            f"<a class='metric interactive' href='pm://learning/{quote(tag, safe='')}'>"
-            f"<strong>{count}</strong><span>{html.escape(tag)}</span></a>"
-            for tag, count in sorted(learning_counts.items(), key=lambda item: (-item[1], item[0]))
-        )
         or "<div class='metric'><strong>0</strong><span>题目总数</span></div>"
     )
     chapters_html = "".join(
@@ -726,7 +745,7 @@ h1 {{ margin:0 0 6px; color:#194d41; font-family:"PingFang SC",sans-serif; }} .s
 </style></head><body><h1>题库概览</h1><p class='sub'>用标签沉淀错题与好题，用章节观察题库覆盖情况。</p><div class='metrics'>{metric_html}</div><div class='grid'><section class='panel'><h2>知识章节题量</h2><table>{chapters_html}</table></section><section class='panel'><h2>近期新增</h2><ul>{recent_html}</ul></section></div></body></html>"""
 
 
-def _render_question_image(image_path: str, css_class: str) -> str:
+def _render_question_image(image_path: str, css_class: str, width_percent: int | None = None) -> str:
     if not image_path:
         return ""
     path = Path(image_path)
@@ -737,4 +756,5 @@ def _render_question_image(image_path: str, css_class: str) -> str:
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     except OSError:
         return "<p class='empty'>配图无法读取</p>"
-    return f"<img class='{css_class}' src='data:{mime_type};base64,{encoded}' alt='题目配图'>"
+    style = "" if width_percent is None else f" style='width:{min(100, max(10, width_percent))}%;max-width:100%;max-height:none;height:auto;display:block;margin:12px auto'"
+    return f"<img class='{css_class}'{style} src='data:{mime_type};base64,{encoded}' alt='题目配图'>"

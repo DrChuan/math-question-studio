@@ -22,12 +22,13 @@ OPTION_LABELS = ["A", "B", "C", "D", "E", "F"]
 class Question:
     id: str = field(default_factory=lambda: uuid4().hex)
     question_type: str = QuestionType.SINGLE.value
-    difficulty: int = 3
+    difficulty: float = 3.0
     source: str = ""
     created_at: str = field(default_factory=lambda: date.today().isoformat())
     image_path: str = ""
     image_paths: list[str] = field(default_factory=list)
     analysis_image_paths: list[str] = field(default_factory=list)
+    image_widths: dict[str, int] = field(default_factory=dict)
     stem: str = ""
     options: list[str] = field(default_factory=lambda: ["", "", "", "", "", ""])
     answer: str = ""
@@ -43,18 +44,19 @@ class Question:
         while len(options) < len(OPTION_LABELS):
             options.append("")
         try:
-            difficulty = int(data.get("difficulty", 3))
+            difficulty = float(data.get("difficulty", 3))
         except (TypeError, ValueError):
             difficulty = 3
         return cls(
             id=data.get("id") or uuid4().hex,
             question_type=data.get("question_type", QuestionType.SINGLE.value),
-            difficulty=min(5, max(1, difficulty)),
+            difficulty=min(5.0, max(0.5, round(difficulty * 2) / 2)),
             source=data.get("source", ""),
             created_at=data.get("created_at") or date.today().isoformat(),
             image_path=data.get("image_path", ""),
             image_paths=list(data.get("image_paths", [])) or ([data["image_path"]] if data.get("image_path") else []),
             analysis_image_paths=list(data.get("analysis_image_paths", [])),
+            image_widths={str(key): min(100, max(10, int(value))) for key, value in data.get("image_widths", {}).items()},
             stem=data.get("stem", ""),
             options=options[: len(OPTION_LABELS)],
             answer=data.get("answer", ""),
@@ -75,6 +77,7 @@ class Question:
             "image_path": self.image_path,
             "image_paths": self.question_images,
             "analysis_image_paths": self.analysis_image_paths,
+            "image_widths": dict(self.image_widths),
             "stem": self.stem,
             "options": self.options[: len(OPTION_LABELS)],
             "answer": self.answer,

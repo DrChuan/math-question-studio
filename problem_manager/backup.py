@@ -8,6 +8,7 @@ from pathlib import Path
 
 from problem_manager.models import AppState, QuestionBasket
 from problem_manager.repository import QuestionRepository
+from problem_manager.image_markup import image_marker, replace_image_code
 
 
 BACKUP_VERSION = 1
@@ -40,6 +41,11 @@ def create_backup(repository: QuestionRepository, state: AppState, destination: 
                 if original.is_file():
                     archive_name = f"{IMAGE_DIRECTORY}/{question_data['id']}-{field}-{index}{original.suffix.lower() or '.png'}"
                     paths.append(archive_name)
+                    if field == "analysis_image_paths":
+                        question_data["analysis"] = replace_image_code(question_data["analysis"], str(original), archive_name, preserve_width=True)
+                    widths = question_data.get("image_widths", {})
+                    if image_marker(str(original)) in widths:
+                        widths[image_marker(archive_name)] = widths.pop(image_marker(str(original)))
                     images.append((original, archive_name))
             question_data[field] = paths
         question_data["image_path"] = next(iter(question_data["image_paths"]), "")

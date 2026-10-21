@@ -51,20 +51,8 @@ class ExportOptionsDialog(QDialog):
         layout_group_layout.addWidget(self.leave_solution_space_checkbox)
         layout.addWidget(layout_group)
 
-        hint = QLabel(
-            "导出会统一改成行内公式、移除“第1题/题型”标题，并按试卷风格输出 .tex 与 .pdf。"
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #5f5a50;")
-        layout.addWidget(hint)
-
-        math_label = QLabel(self._math_type_message())
-        math_label.setWordWrap(True)
-        math_label.setStyleSheet("color: #5f5a50;")
-        layout.addWidget(math_label)
-
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("导出")
+        buttons.button(QDialogButtonBox.Ok).setText("下一步：预览排版")
         buttons.button(QDialogButtonBox.Cancel).setText("取消")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import subprocess
 
-from PIL import Image
-
 from problem_manager.latex_support import split_math_segments
 from problem_manager.math_normalizer import normalize_math_expression
 from problem_manager.models import CHOICE_TYPES, OPTION_LABELS, Question
+from problem_manager.image_markup import split_image_content, image_marker, image_code_settings
 
 
 @dataclass
@@ -19,6 +18,7 @@ class LatexExportOptions:
     include_note: bool = False
     leave_solution_space: bool = False
     compile_pdf: bool = True
+    question_spacing_mm: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -58,6 +58,10 @@ def build_latex_document(questions: list[Question], options: LatexExportOptions)
     body_parts = [_render_title(options.title)]
     for index, question in enumerate(questions, start=1):
         body_parts.append(_render_question(index, question, options))
+        if index < len(questions):
+            gap = max(0.0, min(250.0, options.question_spacing_mm.get(question.id, 0.0)))
+            if gap:
+                body_parts.append(f"\\par\\vspace{{{gap:.2f}mm}}")
 
     body = "\n\n".join(part for part in body_parts if part.strip())
     return (
@@ -81,15 +85,18 @@ def _render_preamble() -> str:
 \usepackage{xcolor}
 \usepackage{calc}
 \usepackage{graphicx}
-\usepackage{wrapfig}
 \usepackage{needspace}
+\usepackage[hidelinks]{hyperref}
+\usepackage{bookmark}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{0.25em}
-\linespread{1.25}
+\linespread{1.38}
+\setlength{\lineskip}{6pt}
+\setlength{\lineskiplimit}{5pt}
 \pagestyle{empty}
 \IfFontExistsTF{Times New Roman}{\setmainfont{Times New Roman}}{\setmainfont{TeX Gyre Termes}}
-\IfFontExistsTF{Songti SC}{\setCJKmainfont{Songti SC}}{\setCJKmainfont{STSong}}
-\IfFontExistsTF{Heiti SC}{\newCJKfontfamily\PMTitleCJK{Heiti SC}}{\newCJKfontfamily\PMTitleCJK{PingFang SC}}
+\IfFontExistsTF{SimSun}{\setCJKmainfont{SimSun}}{\IfFontExistsTF{Songti SC}{\setCJKmainfont{Songti SC}}{\setCJKmainfont{FandolSong-Regular}}}
+\IfFontExistsTF{SimHei}{\newCJKfontfamily\PMTitleCJK{SimHei}}{\IfFontExistsTF{Heiti SC}{\newCJKfontfamily\PMTitleCJK{Heiti SC}}{\newCJKfontfamily\PMTitleCJK{FandolHei-Regular}}}
 \IfFontExistsTF{Times New Roman}{\newfontfamily\PMMathDigitFont{Times New Roman}}{\newfontfamily\PMMathDigitFont{TeX Gyre Termes}}
 % Keep the established newtx math letters and symbols, but use Times-style glyphs for digits only.
 \begingroup\lccode`~=`0\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 0}}}\mathcode`0="8000
@@ -103,8 +110,10 @@ def _render_preamble() -> str:
 \begingroup\lccode`~=`8\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 8}}}\mathcode`8="8000
 \begingroup\lccode`~=`9\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 9}}}\mathcode`9="8000
 \color{black}
-\newcommand{\PMQuestionIndent}{3.6em}
-\newcommand{\PMOptionTextIndent}{3.6em}
+\newlength{\PMQuestionIndent}
+\setlength{\PMQuestionIndent}{1.5em}
+\newlength{\PMOptionTextIndent}
+\setlength{\PMOptionTextIndent}{1.5em}
 \newcommand{\PMOptionLabelWidth}{1.6em}
 \newcommand{\PMLabelIndent}{4.6em}
 \newcommand{\PMOptionCell}[2]{%
@@ -113,10 +122,13 @@ def _render_preamble() -> str:
   }%
 }
 \newcommand{\PMOptionBlock}[1]{%
-  \par\noindent\hspace*{\dimexpr\PMOptionTextIndent-\PMOptionLabelWidth\relax}\begin{minipage}{\dimexpr\linewidth-\PMOptionTextIndent+\PMOptionLabelWidth\relax}#1\end{minipage}\par%
+  \par\noindent\hspace*{\PMOptionTextIndent}\begin{minipage}{\dimexpr\linewidth-\PMOptionTextIndent\relax}#1\end{minipage}\par%
 }
 \newcommand{\PMQuestionLine}[3]{%
-  \par\noindent\hangindent=\PMQuestionIndent\hangafter=1 #1．#2#3\par%
+  \par\settowidth{\PMQuestionIndent}{#1．}\setlength{\PMOptionTextIndent}{\PMQuestionIndent}%
+  \noindent\hangindent=\PMQuestionIndent\hangafter=1%
+  \hypertarget{pm-question-#1}{}\bookmark[dest=pm-question-#1,level=0]{第#1题}%
+  \makebox[\PMQuestionIndent][l]{#1．}#2#3\par%
 }
 \newcommand{\PMLabelLine}[2]{%
   \par\noindent\hangindent=\PMLabelIndent\hangafter=1\textbf{#1：}#2\par%
@@ -127,8 +139,6 @@ def _render_preamble() -> str:
 \newcommand{\PMAnswerParagraph}[1]{%
   \par\noindent\hspace*{2em}#1\par%
 }
-% Add breathing room only to source lines containing display-sized fractions.
-\newcommand{\PMFractionStrut}{\rule[-0.38\baselineskip]{0pt}{1.42\baselineskip}}
 % Leave solution space only when it fits on the current page; otherwise start the next question immediately.
 \newcommand{\PMSolutionBlank}{%
   \par\begingroup\dimen0=\pagegoal\advance\dimen0 by-\pagetotal
@@ -148,14 +158,12 @@ def _render_title(title: str) -> str:
 
 
 def _render_question(index: int, question: Question, options: LatexExportOptions) -> str:
-    image_layout = _get_image_layout(question.question_images[0]) if len(question.question_images) == 1 else None
-    minimum_lines = 16 if question.question_type == "解答题" else 10
-    if image_layout == "wide":
-        minimum_lines += 7
-    parts = [f"\\Needspace{{{minimum_lines}\\baselineskip}}"]
+    stem_lines = max(4, min(12, len(question.stem) // 55 + question.stem.count("\n") + 3))
+    required = f"{stem_lines}\\baselineskip"
+    if question.question_images:
+        required += "+0.30\\textheight+3\\baselineskip"
+    parts = ["\\Needspace{\\dimexpr " + required + "\\relax}"]
     prefix = "（多选）" if question.question_type == "多选题" else ""
-    if image_layout == "wrap":
-        parts.append(_render_wrapped_image(index, question))
     parts.append(
         "\\PMQuestionLine{"
         + str(index)
@@ -166,21 +174,26 @@ def _render_question(index: int, question: Question, options: LatexExportOptions
         + "}"
     )
 
-    if image_layout == "wide":
-        parts.append(_render_wide_image(index, question))
-    if len(question.question_images) > 1:
-        for position, path in enumerate(question.question_images, 1):
-            parts.append(_render_gallery_image(path, f"第{index}题图（{position}）"))
+    for position, path in enumerate(question.question_images, 1):
+        caption = f"第{index}题图" + (f"（{position}）" if len(question.question_images) > 1 else "")
+        parts.append(_render_gallery_image(path, caption, question.image_widths.get(image_marker(path))))
 
     if question.question_type in CHOICE_TYPES:
-        choice_block = _render_choice_block(question, constrained=image_layout == "wrap")
+        choice_block = _render_choice_block(question)
         if choice_block:
             parts.append(choice_block)
 
     if options.include_analysis:
         parts.append(_render_answer_block(question.answer))
-        parts.append(_render_labeled_block("解析", question.analysis))
-        parts.extend(_render_gallery_image(path, "") for path in question.analysis_image_paths)
+        widths = dict(question.image_widths)
+        widths.update({key: value for key, value in image_code_settings(question.analysis, question.analysis_image_paths).items() if value is not None})
+        first = True
+        for kind, content, _ in split_image_content(question.analysis, question.analysis_image_paths):
+            if kind == "image":
+                parts.append(_render_gallery_image(content, "", widths.get(image_marker(content))))
+            elif content.strip():
+                parts.append(_render_labeled_block("解析", content) if first else _render_text_with_inline_math(content, preserve_linebreaks=True) + r"\par")
+                first = False
     if options.include_note:
         parts.append(_render_labeled_block("备注", question.note))
     if options.leave_solution_space and question.question_type == "解答题":
@@ -237,7 +250,15 @@ def _render_labeled_block(label: str, content: str) -> str:
 
 def _render_answer_block(content: str) -> str:
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [_render_inline_fragments(line) for line in normalized.split("\n")]
+    source_lines = [""]
+    for kind, part, _ in split_math_segments(normalized):
+        if kind == "math":
+            source_lines[-1] += "$" + part + "$"
+        else:
+            pieces = part.split("\n")
+            source_lines[-1] += pieces[0]
+            source_lines.extend(pieces[1:])
+    lines = [_render_inline_fragments(line) for line in source_lines]
     lines = [line for line in lines if line]
     if not lines:
         return "\\PMAnswerFirst{}"
@@ -246,85 +267,42 @@ def _render_answer_block(content: str) -> str:
     return "\n".join(blocks)
 
 
-def _get_image_layout(image_path: str) -> str | None:
-    if not image_path:
-        return None
-    path = Path(image_path)
-    if not path.is_file():
-        return None
-    try:
-        with Image.open(path) as image:
-            width, height = image.size
-    except (OSError, ValueError):
-        return None
-    if not width or not height:
-        return None
-    return "wide" if width / height >= 1.35 else "wrap"
-
-
-def _image_include_command(question: Question, width: str, height: str) -> str:
-    path = Path(question.question_images[0]).resolve().as_posix()
-    return "\\includegraphics[width=" + width + ",height=" + height + ",keepaspectratio]{\\detokenize{" + path + "}}"
-
-
-def _render_gallery_image(path: str, caption: str) -> str:
+def _render_gallery_image(path: str, caption: str, width_percent: int | None = None) -> str:
     if not Path(path).is_file():
         return ""
-    return r"\begin{center}\includegraphics[width=0.72\linewidth,height=0.30\textheight,keepaspectratio]{\detokenize{" + Path(path).resolve().as_posix() + "}}\\par " + caption + r"\end{center}"
-
-
-def _render_wide_image(index: int, question: Question) -> str:
-    return (
-        "\\begin{center}\n"
-        + _image_include_command(question, "0.72\\linewidth", "0.32\\textheight")
-        + "\\par\n第"
-        + str(index)
-        + "题图\n\\end{center}"
-    )
-
-
-def _render_wrapped_image(index: int, question: Question) -> str:
-    if question.question_type == "解答题":
-        width, lines, height = "0.36\\textwidth", "12", "0.36\\textheight"
-    else:
-        width, lines, height = "0.32\\textwidth", "8", "0.28\\textheight"
-    return (
-        "\\begin{wrapfigure}["
-        + lines
-        + "]{r}{"
-        + width
-        + "}\n\\centering\n"
-        + _image_include_command(question, "\\linewidth", height)
-        + "\n\\end{wrapfigure}"
-    )
+    width = 0.68 if width_percent is None else min(100, max(10, width_percent)) / 100
+    height = "0.30" if width_percent is None else "0.72"
+    return r"\par\begin{center}\includegraphics[width=" + f"{width:.2f}" + r"\linewidth,height=" + height + r"\textheight,keepaspectratio]{\detokenize{" + Path(path).resolve().as_posix() + "}}\\par " + caption + r"\end{center}"
 
 
 def _render_text_with_inline_math(text: str, preserve_linebreaks: bool = False) -> str:
-    paragraphs = text.replace("\r\n", "\n").replace("\r", "\n").split("\n\n")
-    rendered_paragraphs = [_render_single_paragraph(part, preserve_linebreaks) for part in paragraphs]
-    rendered_paragraphs = [part for part in rendered_paragraphs if part]
-    return r"\par ".join(rendered_paragraphs)
+    fragments = []
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    for kind, content, _ in split_math_segments(normalized):
+        if kind == "math":
+            fragments.append(_render_math_fragment(content))
+        else:
+            for part in re.split(r"(\n[ \t]*\n+|\n)", content):
+                if part.startswith("\n"):
+                    fragments.append(r"\par " if part.count("\n") > 1 else (r"\\ " if preserve_linebreaks else " "))
+                else:
+                    fragments.append(r"\underline{\hspace{4em}}".join(_escape_latex_text(piece) for piece in part.split("@")))
+    return "".join(fragments).strip()
 
 
-def _render_single_paragraph(text: str, preserve_linebreaks: bool) -> str:
-    lines = text.split("\n") if preserve_linebreaks else [text.replace("\n", " ")]
-    rendered_lines = [_add_fraction_spacing(_render_inline_fragments(line)) for line in lines]
-    rendered_lines = [line for line in rendered_lines if line]
-    return r"\\ ".join(rendered_lines)
-
-
-def _add_fraction_spacing(rendered_line: str) -> str:
-    if "\\dfrac" in rendered_line:
-        return "\\PMFractionStrut " + rendered_line
-    return rendered_line
+def _render_math_fragment(content: str) -> str:
+    if not content:
+        return ""
+    expression = normalize_math_expression(content)
+    spacing = r"\rule[-1.0em]{0pt}{3.2em}" if r"\dfrac" in expression else ""
+    return "$" + spacing + expression + "$"
 
 
 def _render_inline_fragments(text: str) -> str:
     fragments: list[str] = []
     for kind, content, _display in split_math_segments(text):
         if kind == "math":
-            if content:
-                fragments.append("$" + normalize_math_expression(content) + "$")
+            fragments.append(_render_math_fragment(content))
         elif content:
             fragments.append(r"\underline{\hspace{4em}}".join(_escape_latex_text(part) for part in content.split("@")))
     return "".join(fragments).strip()
@@ -390,6 +368,7 @@ def _compile_latex(tex_path: Path) -> None:
         cwd=tex_path.parent,
         capture_output=True,
         text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if completed.returncode != 0:
         log = (completed.stdout or "") + "\n" + (completed.stderr or "")

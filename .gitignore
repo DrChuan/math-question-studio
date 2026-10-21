@@ -24,3 +24,9 @@ tmp_export*.docx
 .vscode/
 .idea/
 
+# Portable Windows builds contain private question data and large runtimes.
+export/
+/export.zip
+dist/
+build/
+

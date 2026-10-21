@@ -4,16 +4,18 @@ from datetime import date
 import json
 from pathlib import Path
 import shutil
+import tempfile
 from uuid import uuid4
 from urllib.parse import unquote
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, QRunnable, QSettings, QSignalBlocker, QThreadPool, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QRunnable, QSettings, QSignalBlocker, QThreadPool, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QColorDialog,
     QDialog,
@@ -44,6 +46,9 @@ from PySide6.QtWidgets import (
 
 from problem_manager.export_dialog import ExportOptionsDialog
 from problem_manager.drawing_canvas import DrawingCanvas
+from problem_manager.image_markup import image_marker, image_code, image_code_settings, remove_image_code, replace_image_code
+from problem_manager.star_rating import StarRating
+from problem_manager.latex_tools import MATH_TOOLS, MathTool, LatexReferenceDialog, insert_math_tool
 from problem_manager.backup import (
     BackupError,
     apply_restored_backup,
@@ -64,6 +69,7 @@ from problem_manager.preview import (
     render_text_editor_preview_fragment,
     _render_question_image,
     configure_formula_cache,
+    render_question_context,
 )
 from problem_manager.repository import QuestionRepository
 from problem_manager.tag_catalog import DEFAULT_METHOD_TAGS, KNOWLEDGE_TAG_TREE, flatten_knowledge_tags
@@ -175,23 +181,51 @@ class ImagePasteEditor(QPlainTextEdit):
 class LatexTextEditorDialog(QDialog):
     """Expanded editor with a dedicated offline LaTeX preview."""
 
-    def __init__(self, title: str, text: str, parent=None, image_paths: list[str] | None = None) -> None:
+    def __init__(self, title: str, text: str, parent=None, image_paths: list[str] | None = None, image_widths: dict[str, int] | None = None, question_context: Question | None = None) -> None:
         super().__init__(parent)
+        self.setWindowModality(Qt.ApplicationModal)
+        self._field_title = title
+        self._question_context = question_context
+        self._preview_started = False
         self.setWindowTitle(f"编辑{title}")
-        self.resize(1240, 760)
+        self.resize(1320, 900 if question_context else 780)
         layout = QVBoxLayout(self)
-        hint = QLabel("左侧输入文本与 $...$ 行内公式；右侧实时显示本地 LaTeX 渲染。按住 Command 点击预览可定位到原文。")
-        hint.setObjectName("mutedText")
-        layout.addWidget(hint)
+        self.context_view = None
+        if question_context is not None:
+            self.context_view = QWebEngineView()
+            self.context_view.setMinimumHeight(90)
+            self.context_view.setMaximumHeight(140)
+            layout.addWidget(self.context_view)
         splitter = QSplitter(Qt.Horizontal)
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         self.editor = ImagePasteEditor(text)
         self.attached_images: list[QImage] = []
+        self.attached_image_names: list[str] = []
+        self._image_temp = tempfile.TemporaryDirectory(prefix="question-editor-images-")
         self.image_paths = list(image_paths or [])
+        self.image_widths = dict(image_widths or {})
         self.editor.image_pasted.connect(self._attach_image)
         self.editor.setPlaceholderText(f"请输入{title}，支持 $...$ 形式的 LaTeX")
-        self.editor.setMinimumWidth(460)
+        self.editor.setMinimumWidth(400)
         self.editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        splitter.addWidget(self.editor)
+        tools = QGridLayout()
+        tools.setSpacing(5)
+        for index, tool in enumerate(MATH_TOOLS):
+            button = QPushButton(tool.label)
+            button.setObjectName("secondaryButton")
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setToolTip(tool.code.replace("__SEL__", tool.default))
+            button.clicked.connect(lambda _checked=False, item=tool: insert_math_tool(self.editor, item))
+            tools.addWidget(button, index // 4, index % 4)
+        reference = QPushButton("LaTeX 参考…")
+        reference.setFocusPolicy(Qt.NoFocus)
+        reference.clicked.connect(self.open_latex_reference)
+        tools.addWidget(reference, 1, 3)
+        left_layout.addLayout(tools)
+        left_layout.addWidget(self.editor, 1)
+        splitter.addWidget(left_panel)
         self.preview = QWebEngineView()
         self.preview_page = PreviewSourcePage(self.preview)
         self.preview_page.source_location_requested.connect(self._focus_source_location)
@@ -224,11 +258,55 @@ class LatexTextEditorDialog(QDialog):
         self._preview_timer.timeout.connect(self._request_preview_render)
         self.editor.textChanged.connect(self._preview_timer.start)
         self.preview.loadFinished.connect(self._restore_preview_scroll_position)
+        self._reference_dialogs = set()
+        # WebEngine creates native children lazily. Create their native ancestors
+        # while the dialog is hidden so macOS cannot re-create a visible window.
+        self.winId()
+        self.preview.winId()
+        if self.context_view is not None:
+            self.context_view.winId()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._preview_started:
+            self._preview_started = True
+            QTimer.singleShot(0, self._start_previews)
+
+    def _start_previews(self) -> None:
+        if self._question_context is not None:
+            self._context_task = PreviewRenderTask(0, True, lambda: render_question_context(self._question_context))
+            self._context_task.signals.finished.connect(self._apply_context)
+            PREVIEW_RENDER_POOL.start(self._context_task)
         self._set_preview_html(0)
+
+    def _apply_context(self, generation, full, rendered) -> None:
+        if self.context_view is not None and rendered:
+            self.context_view.setHtml(rendered, QUrl("https://preview.local/"))
+
+    def open_latex_reference(self) -> None:
+        dialog = LatexReferenceDialog(self)
+        self._reference_dialogs.add(dialog)
+        def insert(code):
+            if code == "@":
+                self.editor.insertPlainText(code)
+            else:
+                code = code.strip("$")
+                insert_math_tool(self.editor, MathTool("参考", code))
+        dialog.insert_requested.connect(insert)
+        dialog.finished.connect(lambda _: self._reference_dialogs.discard(dialog))
+        dialog.show()
 
     def _attach_image(self, image: QImage) -> None:
         if not image.isNull():
+            question_id = getattr(self.parent(), "editing_question_id", "dialog") or "dialog"
+            name = f"{question_id}-{uuid4().hex}.png"
+            path = Path(self._image_temp.name) / name
+            if not image.save(str(path), "PNG"):
+                return
             self.attached_images.append(image)
+            self.attached_image_names.append(name)
+            self.image_paths.append(str(path))
+            self.editor.insertPlainText("\n" + image_code(str(path), 68) + "\n")
             self.setWindowTitle(self.windowTitle().split(" · ")[0] + f" · 已粘贴 {len(self.attached_images)} 张图片")
             self._preview_timer.start()
 
@@ -259,21 +337,21 @@ class LatexTextEditorDialog(QDialog):
         except (TypeError, ValueError):
             self._pending_preview_scroll_y = 0
         self._preview_render_generation += 1
-        title = self.windowTitle().removeprefix("编辑")
+        title = self._field_title
         generation = self._preview_render_generation
         text = self.editor.toPlainText()
         full_document = not self._preview_loaded
-        image_html = "".join(_render_question_image(path, "preview-image") for path in self.image_paths)
-        for image in self.attached_images:
-            data = QByteArray()
-            buffer = QBuffer(data)
-            buffer.open(QIODevice.WriteOnly)
-            image.save(buffer, "PNG")
-            image_html += "<p><img style='max-width:100%;max-height:340px' src='data:image/png;base64," + bytes(data.toBase64()).decode("ascii") + "'></p>"
+        image_paths = list(self.image_paths)
+        image_widths = dict(self.image_widths)
+        for key, value in image_code_settings(text, image_paths).items():
+            if value is None:
+                image_widths.pop(key, None)
+            else:
+                image_widths[key] = value
         renderer = (
-            lambda: render_text_editor_preview(text, title).replace("</article>", image_html + "</article>")
+            lambda: render_text_editor_preview(text, title, image_paths, image_widths)
             if full_document
-            else render_text_editor_preview_fragment(text, title) + image_html
+            else render_text_editor_preview_fragment(text, title, image_paths, image_widths)
         )
         task = PreviewRenderTask(generation, full_document, renderer)
         task.signals.finished.connect(self._apply_preview_render)
@@ -427,9 +505,11 @@ class MainWindow(QMainWindow):
         self.editing_image_path = ""
         self.editing_image_paths: list[str] = []
         self.editing_analysis_images: list[str] = []
+        self.editing_image_widths: dict[str, int] = {}
         self._original_image_path = ""
         self._editor_baseline: dict | None = None
         self._text_editor_dialogs: set[LatexTextEditorDialog] = set()
+        self._text_editor_by_field: dict[int, LatexTextEditorDialog] = {}
         self._loading_question = False
         self._changing_browse_tags = False
         self.expanded_question_ids: set[str] = set()
@@ -541,6 +621,11 @@ class MainWindow(QMainWindow):
         knowledge_label = QLabel("知识点（按教材章节）")
         knowledge_label.setObjectName("sectionLabel")
         layout.addWidget(knowledge_label)
+        self.knowledge_search = QLineEdit()
+        self.knowledge_search.setPlaceholderText("搜索教材、章节、知识点")
+        self.knowledge_search.setClearButtonEnabled(True)
+        self.knowledge_search.textChanged.connect(self._filter_knowledge_tree)
+        layout.addWidget(self.knowledge_search)
         self.browse_tag_tree = QTreeWidget()
         self.browse_tag_tree.setHeaderHidden(True)
         self.browse_tag_tree.itemChanged.connect(self._on_browse_knowledge_item_changed)
@@ -563,24 +648,9 @@ class MainWindow(QMainWindow):
         self.browse_method_list.itemChanged.connect(self._on_browse_filter_changed)
         layout.addWidget(self.browse_method_list, 2)
 
-        learning_label = QLabel("学习标签")
-        learning_label.setObjectName("sectionLabel")
-        layout.addWidget(learning_label)
-        learning_row = QHBoxLayout()
-        add_learning_button = QPushButton("新增")
-        add_learning_button.clicked.connect(self.add_learning_tag)
-        rename_learning_button = QPushButton("重命名")
-        rename_learning_button.clicked.connect(self.rename_learning_tag)
-        delete_learning_button = QPushButton("删除")
-        delete_learning_button.clicked.connect(self.delete_learning_tag)
-        learning_row.addWidget(add_learning_button)
-        learning_row.addWidget(rename_learning_button)
-        learning_row.addWidget(delete_learning_button)
-        layout.addLayout(learning_row)
-        self.browse_learning_list = QListWidget()
-        self.browse_learning_list.setMaximumHeight(180)
-        self.browse_learning_list.itemChanged.connect(self._on_browse_filter_changed)
-        layout.addWidget(self.browse_learning_list, 1)
+        # Keep legacy values readable in old backups without exposing a removed feature.
+        self.browse_learning_list = QListWidget(self)
+        self.browse_learning_list.hide()
         return panel
 
     def _build_workspace_panel(self) -> QWidget:
@@ -625,13 +695,6 @@ class MainWindow(QMainWindow):
         self.search_edit.textChanged.connect(self._schedule_search_refresh)
         controls.addWidget(self.search_edit, 1)
 
-        self.question_type_filter_combo = RefinedComboBox()
-        self.question_type_filter_combo.addItem("全部题型", None)
-        for item in QuestionType:
-            self.question_type_filter_combo.addItem(item.value, item.value)
-        self.question_type_filter_combo.currentIndexChanged.connect(self._on_browse_filter_changed)
-        controls.addWidget(self.question_type_filter_combo)
-
         self.active_basket_combo = RefinedComboBox()
         self.active_basket_combo.setObjectName("basketCombo")
         self.active_basket_combo.setMinimumWidth(180)
@@ -646,6 +709,26 @@ class MainWindow(QMainWindow):
         self.export_basket_button.clicked.connect(self.export_basket_questions)
         controls.addWidget(self.export_basket_button)
         layout.addLayout(controls)
+
+        filters = QHBoxLayout()
+        filters.setSpacing(14)
+        filters.addWidget(QLabel("题型"))
+        self.type_checkboxes: dict[str, QCheckBox] = {}
+        for item in QuestionType:
+            checkbox = QCheckBox(item.value)
+            checkbox.setChecked(True)
+            checkbox.toggled.connect(self._on_browse_filter_changed)
+            self.type_checkboxes[item.value] = checkbox
+            filters.addWidget(checkbox)
+        filters.addStretch(1)
+        filters.addWidget(QLabel("排序"))
+        self.sort_combo = RefinedComboBox()
+        for label, key in [("创建时间 · 最新优先", "date_desc"), ("创建时间 · 最早优先", "date_asc"), ("教材章节", "chapter"), ("难度 · 从低到高", "difficulty_asc"), ("难度 · 从高到低", "difficulty_desc")]:
+            self.sort_combo.addItem(label, key)
+        self.sort_combo.setCurrentIndex(2)
+        self.sort_combo.currentIndexChanged.connect(self._on_browse_filter_changed)
+        filters.addWidget(self.sort_combo)
+        layout.addLayout(filters)
 
         browse_info = QHBoxLayout()
         self.browse_count_label = QLabel()
@@ -672,7 +755,8 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         self.edit_header_label = QLabel("编辑题目")
         self.edit_header_label.setObjectName("pageTitle")
-        header.addWidget(self.edit_header_label)
+        self.edit_header_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        header.addWidget(self.edit_header_label, 1)
         header.addStretch(1)
         cancel_button = QPushButton("取消并返回")
         cancel_button.clicked.connect(self.cancel_edit)
@@ -692,10 +776,10 @@ class MainWindow(QMainWindow):
         editor_scroll.setWidgetResizable(True)
         editor_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # Do not let the scroll area be squeezed below a usable writing width.
-        editor_scroll.setMinimumWidth(560)
+        editor_scroll.setMinimumWidth(480)
         editor_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         editor_container = QWidget()
-        editor_container.setMinimumWidth(540)
+        editor_container.setMinimumWidth(0)
         editor_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         editor_layout = QVBoxLayout(editor_container)
         editor_layout.setContentsMargins(12, 12, 12, 18)
@@ -713,27 +797,23 @@ class MainWindow(QMainWindow):
         metadata_layout.addWidget(QLabel("题型"), 0, 0)
         metadata_layout.addWidget(self.question_type_combo, 0, 1)
 
-        self.difficulty_combo = RefinedComboBox()
-        for value in range(1, 6):
-            self.difficulty_combo.addItem(str(value), value)
-        self.difficulty_combo.setMinimumWidth(78)
-        self.difficulty_combo.setMaximumWidth(92)
-        self.difficulty_combo.currentIndexChanged.connect(self._on_editor_changed)
+        self.difficulty_rating = StarRating()
+        self.difficulty_rating.valueChanged.connect(self._on_editor_changed)
         metadata_layout.addWidget(QLabel("难度"), 0, 2)
-        metadata_layout.addWidget(self.difficulty_combo, 0, 3)
+        metadata_layout.addWidget(self.difficulty_rating, 0, 3)
 
         self.source_edit = QLineEdit()
         self.source_edit.setPlaceholderText("可留空，例如：2025 年高考全国卷")
         self.source_edit.textChanged.connect(self._on_editor_changed)
-        self.source_edit.setMinimumWidth(130)
-        metadata_layout.addWidget(QLabel("来源"), 0, 4)
-        metadata_layout.addWidget(self.source_edit, 0, 5)
+        self.source_edit.setMinimumWidth(0)
+        metadata_layout.addWidget(QLabel("来源"), 1, 0)
+        metadata_layout.addWidget(self.source_edit, 1, 1, 1, 4)
 
         self.created_at_label = QLabel()
         self.created_at_label.setObjectName("mutedText")
-        metadata_layout.addWidget(QLabel("创建日期"), 1, 0)
-        metadata_layout.addWidget(self.created_at_label, 1, 1, 1, 5)
-        metadata_layout.setColumnStretch(5, 1)
+        metadata_layout.addWidget(QLabel("创建日期"), 2, 0)
+        metadata_layout.addWidget(self.created_at_label, 2, 1, 1, 4)
+        metadata_layout.setColumnStretch(4, 1)
         editor_layout.addWidget(metadata_group)
 
         self.stem_edit = self._make_editor("支持 $...$；向量用 \\v{a_1} / \\v{AB}；填空横线用 @")
@@ -762,16 +842,19 @@ class MainWindow(QMainWindow):
         self.analysis_edit.image_pasted.connect(lambda image: self._store_qimage(image, analysis=True))
         self._add_editor_section(editor_layout, "解析", self.analysis_edit)
         self.analysis_images_list = QListWidget()
-        self.analysis_images_list.setMaximumHeight(110)
+        self.analysis_images_list.setToolTip("解析图片按文字中的 [[image:…]] 标记定位；可剪切、粘贴标记调整顺序")
+        self.analysis_images_list.setMaximumHeight(72)
         editor_layout.addWidget(self.analysis_images_list)
         analysis_image_row = QHBoxLayout()
         paste_analysis = QPushButton("粘贴解析图片")
         paste_analysis.clicked.connect(lambda: self._store_qimage(QApplication.clipboard().image(), analysis=True))
         remove_analysis = QPushButton("移除选中解析图片")
         remove_analysis.clicked.connect(lambda: self._remove_gallery_image(True))
-        analysis_image_row.addWidget(paste_analysis)
-        analysis_image_row.addWidget(remove_analysis)
-        analysis_image_row.addStretch()
+        insert_analysis = QPushButton("将选中图片放到光标处")
+        insert_analysis.clicked.connect(self._insert_selected_analysis_image)
+        for button in (paste_analysis, insert_analysis, remove_analysis):
+            button.setObjectName("secondaryButton")
+            analysis_image_row.addWidget(button)
         editor_layout.addLayout(analysis_image_row)
         self.note_edit = self._make_editor("备注")
         self.note_edit.textChanged.connect(self._on_editor_changed)
@@ -813,20 +896,9 @@ class MainWindow(QMainWindow):
         method_layout.addWidget(self.method_tag_list)
         editor_layout.addWidget(method_group)
 
-        learning_group = QGroupBox("学习标签")
-        learning_layout = QVBoxLayout(learning_group)
-        learning_row = QHBoxLayout()
-        add_learning_button = QPushButton("新增学习标签")
-        add_learning_button.clicked.connect(self.add_learning_tag)
-        learning_row.addWidget(add_learning_button)
-        learning_row.addStretch(1)
-        learning_layout.addLayout(learning_row)
-        self.learning_tag_list = QListWidget()
-        self.learning_tag_list.setMinimumHeight(120)
-        self.learning_tag_list.itemChanged.connect(self._on_editor_changed)
-        learning_layout.addWidget(self.learning_tag_list)
-        editor_layout.addWidget(learning_group)
-        self.tag_groups = [knowledge_group, method_group, learning_group]
+        self.learning_tag_list = QListWidget(self)
+        self.learning_tag_list.hide()
+        self.tag_groups = [knowledge_group, method_group]
 
         image_group = QGroupBox("题目配图（可选）")
         image_layout = QVBoxLayout(image_group)
@@ -839,6 +911,11 @@ class MainWindow(QMainWindow):
         self.question_images_list.setMaximumHeight(120)
         image_layout.addWidget(self.question_images_list)
         self.question_images_list.currentRowChanged.connect(lambda _: self._update_image_drop_preview())
+        self.question_image_codes = QPlainTextEdit()
+        self.question_image_codes.setMaximumHeight(90)
+        self.question_image_codes.setPlaceholderText("![图片](image:ID){width=40%}")
+        self.question_image_codes.textChanged.connect(self._on_question_image_codes_changed)
+        image_layout.addWidget(self.question_image_codes)
         image_buttons = QHBoxLayout()
         paste_image_button = QPushButton("从剪贴板粘贴")
         paste_image_button.clicked.connect(self.paste_image_from_clipboard)
@@ -850,17 +927,20 @@ class MainWindow(QMainWindow):
         remove_image_button.clicked.connect(self.remove_question_image)
         image_buttons.addWidget(paste_image_button)
         image_buttons.addWidget(choose_image_button)
-        image_buttons.addWidget(draw_image_button)
-        image_buttons.addWidget(remove_image_button)
+        image_tools_row = QHBoxLayout()
+        image_tools_row.addWidget(draw_image_button)
+        image_tools_row.addWidget(remove_image_button)
         image_layout.addLayout(image_buttons)
+        image_layout.addLayout(image_tools_row)
         editor_layout.addWidget(image_group)
         editor_layout.addStretch(1)
         editor_scroll.setWidget(editor_container)
         self.edit_splitter.addWidget(editor_scroll)
 
         self.preview_panel = QWidget()
-        self.preview_panel.setMinimumWidth(360)
-        self.preview_panel.setMaximumWidth(560)
+        self.preview_panel.setMinimumWidth(280)
+        self.preview_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.edit_splitter.setHandleWidth(10)
         preview_layout = QVBoxLayout(self.preview_panel)
         preview_title = QLabel("实时预览（Command + 点击可定位原文）")
         preview_title.setObjectName("mutedText")
@@ -885,6 +965,17 @@ class MainWindow(QMainWindow):
         editor.setMinimumWidth(0)
         editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         return editor
+
+    def _on_question_image_codes_changed(self) -> None:
+        self._apply_image_code_settings(self.question_image_codes.toPlainText(), self.editing_image_paths)
+        self._on_editor_changed()
+
+    def _apply_image_code_settings(self, text: str, paths: list[str]) -> None:
+        for key, value in image_code_settings(text, paths).items():
+            if value is None:
+                self.editing_image_widths.pop(key, None)
+            else:
+                self.editing_image_widths[key] = value
 
     def _toggle_edit_preview(self) -> None:
         visible = not self.preview_panel.isVisible()
@@ -912,19 +1003,35 @@ class MainWindow(QMainWindow):
         layout.addWidget(editor)
 
     def open_text_editor(self, title: str, editor: QPlainTextEdit) -> None:
-        dialog = LatexTextEditorDialog(title, editor.toPlainText(), self, self.editing_analysis_images if editor is self.analysis_edit else [])
+        field_id = id(editor)
+        if field_id in self._text_editor_by_field:
+            existing = self._text_editor_by_field[field_id]
+            existing.raise_()
+            existing.activateWindow()
+            return
+        context = self._build_question_from_editor() if editor in (self.answer_edit, self.analysis_edit) else None
+        dialog = LatexTextEditorDialog(title, editor.toPlainText(), self, self.editing_analysis_images if editor is self.analysis_edit else [], self.editing_image_widths, context)
         self._text_editor_dialogs.add(dialog)
+        self._text_editor_by_field[field_id] = dialog
 
         def finish(result: int) -> None:
             if result == QDialog.Accepted:
+                self.editing_image_widths = dict(dialog.image_widths)
+                self._apply_image_code_settings(dialog.text(), dialog.image_paths)
                 editor.setPlainText(dialog.text())
-                for image in dialog.attached_images:
-                    self._store_qimage(image, analysis=editor is self.analysis_edit)
+                for image, name in zip(dialog.attached_images, dialog.attached_image_names):
+                    self._store_qimage(image, analysis=editor is self.analysis_edit, image_name=name, insert_marker=False)
+                self._on_editor_changed()
             self._text_editor_dialogs.discard(dialog)
+            self._text_editor_by_field.pop(field_id, None)
             dialog.deleteLater()
 
         dialog.finished.connect(finish)
-        dialog.open()
+        # QDialog.open() creates a native macOS sheet and may reparent WebEngine
+        # windows during presentation. Keep this a regular modal window.
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def draw_question_image(self) -> None:
         if not self.editing_question_id:
@@ -1055,9 +1162,11 @@ class MainWindow(QMainWindow):
             self._refresh_browse_results()
 
     def _clear_all_browse_filters(self) -> None:
-        with QSignalBlocker(self.search_edit), QSignalBlocker(self.question_type_filter_combo):
+        with QSignalBlocker(self.search_edit):
             self.search_edit.clear()
-            self.question_type_filter_combo.setCurrentIndex(0)
+        for checkbox in self.type_checkboxes.values():
+            with QSignalBlocker(checkbox):
+                checkbox.setChecked(True)
         self._clear_browse_tag_filters(render=False)
 
     def _set_all_tree_checks(self, item: QTreeWidgetItem, state: Qt.CheckState) -> None:
@@ -1068,6 +1177,23 @@ class MainWindow(QMainWindow):
 
     def _expand_all_browse_tags(self) -> None:
         self.browse_tag_tree.expandAll()
+
+    def _filter_knowledge_tree(self, text: str) -> None:
+        keyword = text.strip().casefold()
+        def visit(item, parent_match=False):
+            matches = parent_match or keyword in str(item.data(0, Qt.UserRole) or item.text(0)).casefold()
+            visible = matches
+            for index in range(item.childCount()):
+                visible = visit(item.child(index), matches) or visible
+            item.setHidden(bool(keyword) and not visible)
+            if keyword and visible and item.childCount():
+                item.setExpanded(True)
+            return visible
+        for index in range(self.browse_tag_tree.topLevelItemCount()):
+            visit(self.browse_tag_tree.topLevelItem(index))
+
+    def _selected_question_types(self) -> set[str]:
+        return {name for name, checkbox in self.type_checkboxes.items() if checkbox.isChecked()}
 
     def _selected_browse_tag_filters(self) -> list[str]:
         selected: list[str] = []
@@ -1119,17 +1245,15 @@ class MainWindow(QMainWindow):
         keyword = self.search_edit.text().strip()
         if keyword:
             parts.append(f"关键词：{keyword}")
-        if self.question_type_filter_combo.currentData():
-            parts.append(f"题型：{self.question_type_filter_combo.currentText()}")
+        types = self._selected_question_types()
+        if len(types) != len(QuestionType):
+            parts.append("题型：" + ("、".join(name for name in self.type_checkboxes if name in types) or "未选择"))
         knowledge = self._selected_browse_tag_filters()
         methods = self._selected_browse_method_filters()
-        learning = self._selected_browse_learning_filters()
         if knowledge:
             parts.append(f"知识点 {len(knowledge)} 项")
         if methods:
             parts.append(f"方法/思想 {len(methods)} 项")
-        if learning:
-            parts.append(f"学习标签 {len(learning)} 项")
         return "当前筛选：" + " · ".join(parts) if parts else "当前筛选：全部题目"
 
     def _sync_basket_controls(self) -> None:
@@ -1152,15 +1276,14 @@ class MainWindow(QMainWindow):
 
     def _filtered_questions(self) -> list[Question]:
         keyword = self.search_edit.text().strip().lower()
-        question_type = self.question_type_filter_combo.currentData()
+        question_types = self._selected_question_types()
         knowledge_filters = self._selected_browse_tag_filters()
         method_filters = self._selected_browse_method_filters()
-        learning_filters = self._selected_browse_learning_filters()
         result = []
         for question in self.questions:
             if keyword and keyword not in self._question_index_text(question):
                 continue
-            if question_type and question.question_type != question_type:
+            if question.question_type not in question_types:
                 continue
             if knowledge_filters and not any(
                 tag.startswith(prefix) for tag in question.knowledge_tags for prefix in knowledge_filters
@@ -1168,10 +1291,14 @@ class MainWindow(QMainWindow):
                 continue
             if method_filters and not method_filters.intersection(question.method_tags):
                 continue
-            if learning_filters and not learning_filters.intersection(question.learning_tags):
-                continue
             result.append(question)
-        return self._sort_questions_by_knowledge(result)
+        mode = self.sort_combo.currentData()
+        insertion_order = {question.id: index for index, question in enumerate(self.questions)}
+        if mode == "chapter":
+            return self._sort_questions_by_knowledge(result)
+        if mode.startswith("date"):
+            return sorted(result, key=lambda question: (question.created_at, insertion_order[question.id]), reverse=mode == "date_desc")
+        return sorted(result, key=lambda question: (question.difficulty, question.created_at, insertion_order[question.id]), reverse=mode == "difficulty_desc")
 
     def _question_index_text(self, question: Question) -> str:
         return " ".join(
@@ -1185,7 +1312,6 @@ class MainWindow(QMainWindow):
                 question.note,
                 " ".join(question.knowledge_tags),
                 " ".join(question.method_tags),
-                " ".join(question.learning_tags),
             ]
         ).lower()
 
@@ -1372,12 +1498,13 @@ class MainWindow(QMainWindow):
             index = self._find_question_index(question.id) or 0
             self.edit_header_label.setText(f"编辑题目：{question.title(index)}")
             self.question_type_combo.setCurrentText(question.question_type)
-            self.difficulty_combo.setCurrentIndex(max(0, question.difficulty - 1))
+            self.difficulty_rating.setValue(question.difficulty)
             self.source_edit.setText(question.source)
             self.created_at_label.setText(question.created_at)
             self.editing_image_path = question.image_path
             self.editing_image_paths = list(question.question_images)
             self.editing_analysis_images = list(question.analysis_image_paths)
+            self.editing_image_widths = dict(question.image_widths)
             self._refresh_image_lists()
             self._original_image_path = question.image_path
             self._update_image_drop_preview()
@@ -1385,7 +1512,10 @@ class MainWindow(QMainWindow):
             for editor, content in zip(self.option_edits, question.options):
                 editor.setText(content)
             self.answer_edit.setPlainText(question.answer)
-            self.analysis_edit.setPlainText(question.analysis)
+            analysis = question.analysis
+            for path in question.analysis_image_paths:
+                analysis = replace_image_code(analysis, path, path, question.image_widths.get(image_marker(path)), preserve_width=True)
+            self.analysis_edit.setPlainText(analysis)
             self.note_edit.setPlainText(question.note)
             self._set_checked_edit_knowledge_tags(question.knowledge_tags)
             self._populate_method_tag_list(question.method_tags)
@@ -1398,12 +1528,13 @@ class MainWindow(QMainWindow):
 
     def _clear_editor_fields(self) -> None:
         self.question_type_combo.setCurrentText(QuestionType.SINGLE.value)
-        self.difficulty_combo.setCurrentIndex(2)
+        self.difficulty_rating.setValue(3)
         self.source_edit.clear()
         self.created_at_label.setText(Question().created_at)
         self.editing_image_path = ""
         self.editing_image_paths = []
         self.editing_analysis_images = []
+        self.editing_image_widths = {}
         self._refresh_image_lists()
         self._original_image_path = ""
         self._update_image_drop_preview()
@@ -1437,11 +1568,12 @@ class MainWindow(QMainWindow):
     def _editor_snapshot(self) -> dict:
         return {
             "question_type": self.question_type_combo.currentText(),
-            "difficulty": self.difficulty_combo.currentData(),
+            "difficulty": self.difficulty_rating.value(),
             "source": self.source_edit.text(),
             "image_path": self.editing_image_path,
             "image_paths": list(self.editing_image_paths),
             "analysis_images": list(self.editing_analysis_images),
+            "image_widths": dict(self.editing_image_widths),
             "stem": self.stem_edit.toPlainText(),
             "options": [editor.text() for editor in self.option_edits],
             "answer": self.answer_edit.toPlainText(),
@@ -1573,17 +1705,23 @@ class MainWindow(QMainWindow):
         original = self._get_question_by_id(self.editing_question_id)
         question = Question.from_dict(original.to_dict()) if original else Question(id=self.editing_question_id or Question().id)
         question.question_type = self.question_type_combo.currentText()
-        question.difficulty = int(self.difficulty_combo.currentData())
+        question.difficulty = self.difficulty_rating.value()
         question.source = self.source_edit.text().strip()
         question.created_at = self.created_at_label.text() or question.created_at
         question.image_path = self.editing_image_path
         question.image_paths = list(self.editing_image_paths)
         question.image_path = question.image_paths[0] if question.image_paths else ""
         question.analysis_image_paths = list(self.editing_analysis_images)
+        question.image_widths = dict(self.editing_image_widths)
         question.stem = normalize_mixed_latex_text(self.stem_edit.toPlainText())
         question.options = [normalize_mixed_latex_text(editor.text()) for editor in self.option_edits]
         question.answer = normalize_mixed_latex_text(self.answer_edit.toPlainText())
         question.analysis = normalize_mixed_latex_text(self.analysis_edit.toPlainText())
+        for key, value in image_code_settings(question.analysis, question.analysis_image_paths).items():
+            if value is None:
+                question.image_widths.pop(key, None)
+            else:
+                question.image_widths[key] = value
         question.note = normalize_mixed_latex_text(self.note_edit.toPlainText())
         question.knowledge_tags = self._selected_edit_knowledge_tags()
         question.method_tags = self._selected_method_tags()
@@ -1614,15 +1752,17 @@ class MainWindow(QMainWindow):
             return
         self._store_qimage(image)
 
-    def _store_qimage(self, image: QImage, *, analysis: bool = False) -> None:
+    def _store_qimage(self, image: QImage, *, analysis: bool = False, image_name: str | None = None, insert_marker: bool = True) -> None:
         if image.isNull() or not self.editing_question_id:
             return
-        target = self.draft_image_directory / f"{self.editing_question_id}-{uuid4().hex}.png"
+        target = self.draft_image_directory / (image_name or f"{self.editing_question_id}-{uuid4().hex}.png")
         if not image.save(str(target), "PNG"):
             QMessageBox.warning(self, "保存图片失败", "无法将图片保存到题库资源目录。")
             return
         paths = self.editing_analysis_images if analysis else self.editing_image_paths
         paths.append(str(target.resolve()))
+        if analysis and insert_marker:
+            self.analysis_edit.insertPlainText("\n" + image_code(str(target), 68) + "\n")
         self.editing_image_path = self.editing_image_paths[0] if self.editing_image_paths else ""
         self._refresh_image_lists()
         self._update_image_drop_preview()
@@ -1631,8 +1771,25 @@ class MainWindow(QMainWindow):
     def remove_question_image(self) -> None:
         self._remove_gallery_image(False)
 
+    def _insert_selected_analysis_image(self) -> None:
+        row = self.analysis_images_list.currentRow()
+        if not 0 <= row < len(self.editing_analysis_images):
+            return
+        path = self.editing_analysis_images[row]
+        marker = image_code(path, self.editing_image_widths.get(image_marker(path), 68))
+        text = self.analysis_edit.toPlainText()
+        position = self.analysis_edit.textCursor().position()
+        position = len(remove_image_code(text[:position], path))
+        self.analysis_edit.setPlainText(remove_image_code(text, path))
+        cursor = self.analysis_edit.textCursor()
+        cursor.setPosition(min(position, len(self.analysis_edit.toPlainText())))
+        self.analysis_edit.setTextCursor(cursor)
+        self.analysis_edit.insertPlainText("\n" + marker + "\n")
+        self.analysis_edit.setFocus()
+
     def _refresh_image_lists(self) -> None:
         for widget, paths in [(self.question_images_list, self.editing_image_paths), (self.analysis_images_list, self.editing_analysis_images)]:
+            widget.setVisible(bool(paths))
             with QSignalBlocker(widget):
                 widget.clear()
                 for index, path in enumerate(paths, 1):
@@ -1642,6 +1799,9 @@ class MainWindow(QMainWindow):
                     widget.addItem(item)
                 if paths:
                     widget.setCurrentRow(len(paths) - 1)
+        with QSignalBlocker(self.question_image_codes):
+            self.question_image_codes.setPlainText("\n".join(image_code(path, self.editing_image_widths.get(image_marker(path))) for path in self.editing_image_paths))
+        self.question_image_codes.setVisible(bool(self.editing_image_paths))
 
     def _remove_gallery_image(self, analysis: bool) -> None:
         widget = self.analysis_images_list if analysis else self.question_images_list
@@ -1650,6 +1810,9 @@ class MainWindow(QMainWindow):
         if not 0 <= row < len(paths):
             return
         removed = Path(paths.pop(row))
+        self.editing_image_widths.pop(image_marker(str(removed)), None)
+        if analysis:
+            self.analysis_edit.setPlainText(remove_image_code(self.analysis_edit.toPlainText(), str(removed)))
         if removed.parent == self.draft_image_directory.resolve():
             removed.unlink(missing_ok=True)
         self.editing_image_path = self.editing_image_paths[0] if self.editing_image_paths else ""
@@ -2076,12 +2239,17 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def export_basket_questions(self) -> None:
+        from problem_manager.export_preview import ExportPreviewDialog
         questions = self._basket_questions()
         if not questions:
             QMessageBox.information(self, "试题篮为空", f"“{self._current_basket().name}”中还没有题目。")
             return
         dialog = ExportOptionsDialog(self.math_type_status, self)
         if dialog.exec() == 0:
+            return
+        preview = ExportPreviewDialog(questions, dialog.build_options(), self._current_basket().name, self)
+        if preview.exec() == 0:
+            preview.deleteLater()
             return
         target, _ = QFileDialog.getSaveFileName(
             self,
@@ -2090,12 +2258,15 @@ class MainWindow(QMainWindow):
             "LaTeX 源文件 (*.tex)",
         )
         if not target:
+            preview.deleteLater()
             return
         try:
-            result = export_questions_to_latex_bundle(questions, target, dialog.build_options())
-        except LatexExportError as error:
+            result = preview.save_to(target)
+        except (OSError, RuntimeError) as error:
             QMessageBox.critical(self, "导出失败", f"LaTeX / PDF 导出失败：\n{error}")
+            preview.deleteLater()
             return
+        preview.deleteLater()
         message = f"已导出“{self._current_basket().name}”中的 {len(questions)} 道题。\n\n.tex 文件：\n{result.tex_path}"
         if result.pdf_path:
             message += f"\n\n.pdf 文件：\n{result.pdf_path}"
@@ -2152,20 +2323,21 @@ class MainWindow(QMainWindow):
 
     def _sort_questions_by_knowledge(self, questions: list[Question]) -> list[Question]:
         order = {tag: index for index, tag in enumerate(flatten_knowledge_tags())}
+        insertion_order = {question.id: index for index, question in enumerate(self.questions)}
         for tag, rank in list(order.items()):
             parts = tag.split(" / ")
             for length in range(1, len(parts)):
                 order.setdefault(" / ".join(parts[:length]), rank)
         untagged_rank = len(order) + 1
 
-        def sort_key(question: Question) -> tuple[int, int, str]:
+        def sort_key(question: Question) -> tuple[int, int, int]:
             ranks = [order[tag] for tag in question.knowledge_tags if tag in order]
             rank = min(ranks) if ranks else untagged_rank
             try:
                 created_rank = -date.fromisoformat(question.created_at).toordinal()
             except ValueError:
                 created_rank = 0
-            return rank, created_rank, question.id
+            return rank, created_rank, -insertion_order.get(question.id, 0)
 
         return sorted(questions, key=sort_key)
 
@@ -2221,7 +2393,7 @@ class MainWindow(QMainWindow):
         prompt.setWindowTitle("恢复题库")
         prompt.setText("请选择恢复方式。")
         prompt.setInformativeText(
-            f"备份包含 {len(restored.state.questions)} 道题、{len(restored.state.learning_tag_library)} 个学习标签、"
+            f"备份包含 {len(restored.state.questions)} 道题、"
             f"{len(restored.state.baskets)} 个试题篮和 {len(restored.image_sources)} 张配图。\n\n"
             "合并会保留当前内容；覆盖会替换当前题目、标签和试题篮。"
         )
@@ -2237,7 +2409,7 @@ class MainWindow(QMainWindow):
             final_confirm = QMessageBox.warning(
                 self,
                 "最终确认覆盖",
-                "覆盖恢复会替换当前题目、学习标签和试题篮。此操作无法撤销。\n\n确定继续吗？",
+                "覆盖恢复会替换当前题目、标签和试题篮。此操作无法撤销。\n\n确定继续吗？",
                 QMessageBox.Yes | QMessageBox.Cancel,
                 QMessageBox.Cancel,
             )
@@ -2262,7 +2434,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "恢复完成",
-            f"{mode}。\n当前共有 {len(self.questions)} 道题、{len(self.learning_tag_library)} 个学习标签、"
+            f"{mode}。\n当前共有 {len(self.questions)} 道题、"
             f"{len(self.baskets)} 个试题篮；已处理 {len(restored.image_sources)} 张配图。",
         )
 

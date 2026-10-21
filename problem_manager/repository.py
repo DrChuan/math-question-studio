@@ -31,7 +31,7 @@ class QuestionRepository:
         if "questions" not in data and isinstance(data, list):
             default_basket = QuestionBasket()
             return AppState(
-                questions=[Question.from_dict(item) for item in data],
+                questions=[self._read_question(item) for item in data],
                 method_tag_library=list(DEFAULT_METHOD_TAGS),
                 learning_tag_library=[],
                 baskets=[default_basket],
@@ -47,7 +47,7 @@ class QuestionRepository:
         if active_basket_id not in {basket.id for basket in baskets}:
             active_basket_id = baskets[0].id
         return AppState(
-            questions=[Question.from_dict(item) for item in data.get("questions", [])],
+            questions=[self._read_question(item) for item in data.get("questions", [])],
             method_tag_library=list(data.get("method_tag_library", DEFAULT_METHOD_TAGS)),
             learning_tag_library=list(data.get("learning_tag_library", [])),
             baskets=baskets,
@@ -56,10 +56,38 @@ class QuestionRepository:
         )
 
     def save(self, state: AppState) -> None:
+        payload = self.to_payload(state, include_vmware_profile=True)
+        for question in payload["questions"]:
+            question["image_path"] = self._portable_image_path(question["image_path"])
+            for field in ("image_paths", "analysis_image_paths"):
+                question[field] = [self._portable_image_path(path) for path in question[field]]
         self.data_file.write_text(
-            json.dumps(self.to_payload(state, include_vmware_profile=True), ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _read_question(self, payload: dict) -> Question:
+        question = Question.from_dict(payload)
+        def absolute(path):
+            if not path:
+                return ""
+            target = Path(path)
+            return str(target if target.is_absolute() else (self.data_file.parent / target).resolve())
+        question.image_path = absolute(question.image_path)
+        question.image_paths = [absolute(path) for path in question.image_paths]
+        question.analysis_image_paths = [absolute(path) for path in question.analysis_image_paths]
+        return question
+
+    def _portable_image_path(self, path: str) -> str:
+        if not path:
+            return ""
+        target = Path(path)
+        if not target.is_absolute():
+            return target.as_posix()
+        try:
+            return target.resolve().relative_to(self.data_file.parent.resolve()).as_posix()
+        except ValueError:
+            return str(target)
 
     def to_payload(self, state: AppState, *, include_vmware_profile: bool = False) -> dict:
         payload: dict = {

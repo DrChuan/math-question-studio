@@ -11,7 +11,7 @@ def normalize_math_expression(expr: str, *, expand_shortcuts: bool = True) -> st
         normalized = _expand_vectors(normalized)
         normalized = normalized.replace("@", r"\underline{\quad\quad}")
     normalized = normalized.replace(r"\tfrac", r"\dfrac")
-    normalized = re.sub(r"(?<![A-Za-z])\\frac\b", r"\\dfrac", normalized)
+    normalized = re.sub(r"\\frac(?![A-Za-z])", r"\\dfrac", normalized)
     normalized = _expand_compact_fractions(normalized)
     # Accept pasted single/double backslashes, then store one canonical LaTeX command.
     normalized = re.sub(

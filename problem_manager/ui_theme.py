@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pathlib import Path
 
 
 APP_STYLESHEET = """
@@ -287,6 +288,7 @@ QCheckBox::indicator {
 QCheckBox::indicator:checked {
     background: #28735f;
     border-color: #28735f;
+    image: url("__CHECKMARK__");
 }
 
 QDialog {
@@ -300,4 +302,4 @@ QDialog QLabel {
 QDialogButtonBox {
     padding-top: 6px;
 }
-"""
+""".replace("__CHECKMARK__", (Path(__file__).parent / "assets" / "checkmark.svg").as_posix())

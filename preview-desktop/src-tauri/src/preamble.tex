@@ -1,0 +1,74 @@
+\documentclass[12pt,fontset=none]{ctexart}
+\usepackage[a4paper,left=3.17cm,right=3.17cm,top=2.54cm,bottom=2.54cm]{geometry}
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{newtxmath}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{xcolor}
+\usepackage{calc}
+\usepackage{graphicx}
+\usepackage{needspace}
+\usepackage[hidelinks]{hyperref}
+\usepackage{bookmark}
+\usepackage{zref-savepos,zref-abspage}
+\makeatletter
+\zref@addprop{savepos}{abspage}
+\makeatother
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.25em}
+\linespread{1.38}
+\setlength{\lineskip}{6pt}
+\setlength{\lineskiplimit}{5pt}
+\pagestyle{empty}
+\IfFontExistsTF{Times New Roman}{\setmainfont{Times New Roman}}{\setmainfont{TeX Gyre Termes}}
+\IfFontExistsTF{SimSun}{\setCJKmainfont{SimSun}}{\IfFontExistsTF{Songti SC}{\setCJKmainfont{Songti SC}}{\setCJKmainfont{FandolSong-Regular}}}
+\IfFontExistsTF{SimHei}{\newCJKfontfamily\PMTitleCJK{SimHei}}{\IfFontExistsTF{Heiti SC}{\newCJKfontfamily\PMTitleCJK{Heiti SC}}{\newCJKfontfamily\PMTitleCJK{FandolHei-Regular}}}
+\IfFontExistsTF{Times New Roman}{\newfontfamily\PMMathDigitFont{Times New Roman}}{\newfontfamily\PMMathDigitFont{TeX Gyre Termes}}
+% Keep the established newtx math letters and symbols, but use Times-style glyphs for digits only.
+\begingroup\lccode`~=`0\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 0}}}\mathcode`0="8000
+\begingroup\lccode`~=`1\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 1}}}\mathcode`1="8000
+\begingroup\lccode`~=`2\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 2}}}\mathcode`2="8000
+\begingroup\lccode`~=`3\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 3}}}\mathcode`3="8000
+\begingroup\lccode`~=`4\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 4}}}\mathcode`4="8000
+\begingroup\lccode`~=`5\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 5}}}\mathcode`5="8000
+\begingroup\lccode`~=`6\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 6}}}\mathcode`6="8000
+\begingroup\lccode`~=`7\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 7}}}\mathcode`7="8000
+\begingroup\lccode`~=`8\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 8}}}\mathcode`8="8000
+\begingroup\lccode`~=`9\lowercase{\endgroup\gdef~{\text{\PMMathDigitFont 9}}}\mathcode`9="8000
+\color{black}
+\newlength{\PMQuestionIndent}
+\setlength{\PMQuestionIndent}{1.5em}
+\newlength{\PMOptionTextIndent}
+\setlength{\PMOptionTextIndent}{1.5em}
+\newcommand{\PMOptionLabelWidth}{1.6em}
+\newcommand{\PMLabelIndent}{4.6em}
+\newcommand{\PMOptionCell}[2]{%
+  \parbox[t]{\linewidth}{%
+    \hangindent=\PMOptionLabelWidth\hangafter=1\noindent\makebox[\PMOptionLabelWidth][l]{#1.}#2%
+  }%
+}
+\newcommand{\PMOptionBlock}[1]{%
+  \par\noindent\hspace*{\PMOptionTextIndent}\begin{minipage}{\dimexpr\linewidth-\PMOptionTextIndent\relax}#1\end{minipage}\par%
+}
+\newcommand{\PMQuestionLine}[3]{%
+  \par\settowidth{\PMQuestionIndent}{#1．}\setlength{\PMOptionTextIndent}{\PMQuestionIndent}%
+  \noindent\hangindent=\PMQuestionIndent\hangafter=1%
+  \zsavepos{pm-pos-#1}\hypertarget{pm-question-#1}{}\bookmark[dest=pm-question-#1,level=0]{第#1题}%
+  \makebox[\PMQuestionIndent][l]{#1．}#2#3\par%
+}
+\newcommand{\PMLabelLine}[2]{%
+  \par\noindent\hangindent=\PMLabelIndent\hangafter=1\textbf{#1：}#2\par%
+}
+\newcommand{\PMAnswerFirst}[1]{%
+  \par\noindent\textbf{答案：}\hspace{0.6em}#1\par%
+}
+\newcommand{\PMAnswerParagraph}[1]{%
+  \par\noindent\hspace*{2em}#1\par%
+}
+% Leave solution space only when it fits on the current page; otherwise start the next question immediately.
+\newcommand{\PMSolutionBlank}{%
+  \par\begingroup\dimen0=\pagegoal\advance\dimen0 by-\pagetotal
+  \ifdim\dimen0>11\baselineskip\vspace*{9\baselineskip}\fi\endgroup%
+}

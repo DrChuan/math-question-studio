@@ -1,0 +1,27 @@
+{
+  "productName": "Math Question Studio",
+  "version": "1.0.0",
+  "identifier": "lab.chuan.problemmanager.preview",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1431",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "高中数学题目管理器",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 900,
+        "minHeight": 620
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src ipc: http://ipc.localhost; frame-src blob:; object-src 'none'"
+    }
+  },
+  "bundle": { "active": true, "targets": ["app", "nsis"], "icon": ["icons/icon.png", "icons/icon.ico"], "macOS": { "signingIdentity": "-" } }
+}

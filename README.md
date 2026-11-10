@@ -1,12 +1,13 @@
 # Math Question Studio
 
-一个使用 PySide6 开发的高中数学题库桌面程序，适合录入、整理、筛选和导出含 LaTeX 公式的数学题目。
+一个高中数学题库桌面程序，适合录入、整理、筛选和导出含 LaTeX 公式的数学题目。桌面版使用 React、TypeScript、Tauri 和 Rust。
 
 ## 功能
 
 - 支持单选题、多选题、填空题、解答题
 - 题干、选项、答案、解析、备注均可输入行内 LaTeX
 - 离线数学公式预览，不依赖网络
+- 用百炼识别题目截图，校对后将文本和 LaTeX 填入题干
 - 高中数学知识点树与可自定义的方法/思想标签
 - 题目难度、来源、创建日期、多张题图与解析贴图
 - 多标签检索、全文搜索与可保存试题篮
@@ -17,20 +18,11 @@
 
 ## 启动
 
-建议在 Python 3.9+ 环境中安装依赖：
+从 [GitHub Releases](https://github.com/DrChuan/math-question-studio/releases) 下载 macOS 或 Windows 安装包。已克隆项目的 macOS 用户也可以双击 `启动题库.command`。构建和开发步骤见 [桌面版说明](preview-desktop/README.md)。
 
-```bash
-pip install -r requirements.txt
-python app.py
-```
+桌面版使用应用数据目录保存题库，实际位置显示在窗口底部。已使用试用版的用户可直接继续使用已有题库和百炼设置。第一次从源码目录启动时，桌面版可从原 Python 题库建立副本。跨设备迁移可在旧设备「备份题库」，再在新设备「恢复题库」。
 
-macOS 上如使用 Conda：
-
-```bash
-conda run -n base python app.py
-```
-
-首次启动会自动写入测试题。个人题库数据保存在 `data/questions.json`，并被 Git 忽略，避免题目内容和本地图片被上传。
+「识别题目图片」支持选择、粘贴和裁剪截图。首次使用需在「百炼设置」填写 API Key 和地域。点击「识别题文」后可以校对公式、复制结果或填入题干。
 
 ## 公式输入
 
@@ -51,8 +43,11 @@ conda run -n base python app.py
 
 ## 导出 PDF
 
-Windows 便携版的打包材料可通过 `python packaging/prepare_export.py` 生成到 `export/`，其中包含当前题库和配图，不包含虚拟机配置。将整个目录搬到 Windows 后双击 `build.bat`；首次构建需要联网，脚本会准备独立 Python 构建环境及便携 LaTeX，产物位于 `dist/MathQuestionManager/`。以后移动整个产物目录即可，无需目标电脑安装 Python 或 LaTeX。已有产物不会被覆盖。使用说明见打包材料中的 `README.txt`。
-
-PDF 导出依赖 XeLaTeX。macOS 可以安装 MacTeX 或 BasicTeX；安装后，程序会同时生成可编辑的 `.tex` 和排版后的 `.pdf`。
+PDF 导出需要 XeLaTeX、xdvipdfmx 和文档使用的宏包。macOS 可使用 MacTeX，Windows 可使用 TeX Live。应用通过 Ghostscript 或 Poppler 渲染高清预览，并支持题目双向定位。安装后请让应用能从 PATH 找到这些工具，macOS 也会查找标准 MacTeX 安装路径。
 
 选择导出内容后进入真实 PDF 预览：题目列表显示导出题号，可拖动或上下移动题目；点击列表定位到 PDF 中的对应题目，点击 PDF 中的题目也会反选列表。可设置选中题目与下一题之间的额外留白，在带缩略图的插图列表中选择题图或解析图，再用滑块或百分比输入框调整图片宽度（占正文宽度的 10%～100%），也可恢复自动大小。调整会自动重新排版，顶部状态条显示编译进度，期间保留旧预览；确认后保存当前预览对应的 `.tex` 与 `.pdf`。这些排版调整仅影响本次导出，不改动题库。
+
+
+## 旧版 Python 程序
+
+原版可以通过 `pip install -r requirements.txt` 安装依赖，再运行 `python app.py`。原版继续读取 `data/questions.json`。如需旧版 Windows 便携打包材料，运行 `python packaging/prepare_export.py`，并参照生成目录中的 `README.txt`。
